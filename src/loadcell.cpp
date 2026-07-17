@@ -2,11 +2,7 @@
 #include <math.h>
 
 // Global calibration state
-static Calibration cal = {0, 0, false};
-
-// Linear regression parameters: grams = slope * (raw - offset)
-static float slope = 1.0;       // grams per raw unit
-static float offset = 0.0;      // raw value at 0g
+static Calibration cal = {0, {{0}}, 1.0f, 0.0f, 0.0f, false};
 
 void loadcell_init(int dout_pin, int sck_pin) {
   // HX711 is initialized externally in main.cpp via scale.begin()
@@ -116,31 +112,132 @@ float loadcell_read(HX711* scale) {
   return result;
 }
 
-void loadcell_calibrate_offset(HX711* scale) {
-  cal.raw_at_0g = loadcell_read(scale);
-  offset = cal.raw_at_0g;
+// =====================================================
+// Linear Regression Calibration Implementation
+// =====================================================
 
-  // (Re)calculate slope if both points are known
-  if (cal.calibrated) {
-    float raw_diff = cal.raw_at_calib - cal.raw_at_0g;
-    if (fabs(raw_diff) > 1e-6f) {
-      slope = CALIB_WEIGHT_GRAMS / raw_diff;
-    }
+// Performs a filtered read and stores a calibration point at the given weight.
+// This is the primary way to add a calibration point during live calibration.
+void loadcell_add_calibration_point(HX711* scale, float weight_g) {
+  if (cal.num_points >= MAX_CALIB_POINTS) {
+    Serial.println("ERROR: Max calibration points reached.");
+    return;
   }
+
+  float raw = loadcell_read(scale);
+  cal.points[cal.num_points].raw_value = raw;
+  cal.points[cal.num_points].weight_g = weight_g;
+  cal.num_points++;
+  cal.calibrated = false;  // regression needs to be recomputed
+
+  Serial.print("Added calibration point: raw=");
+  Serial.print(raw, 2);
+  Serial.print(", weight=");
+  Serial.print(weight_g, 2);
+  Serial.println(" g");
 }
 
-void loadcell_calibrate_weight(HX711* scale) {
-  cal.raw_at_calib = loadcell_read(scale);
+void loadcell_add_manual_point(float raw_value, float weight_g) {
+  if (cal.num_points >= MAX_CALIB_POINTS) {
+    Serial.println("ERROR: Max calibration points reached.");
+    return;
+  }
+  cal.points[cal.num_points].raw_value = raw_value;
+  cal.points[cal.num_points].weight_g  = weight_g;
+  cal.num_points++;
+  cal.calibrated = false;
+  Serial.print("Added manual point: raw=");
+  Serial.print(raw_value, 2);
+  Serial.print(", weight=");
+  Serial.print(weight_g, 2);
+  Serial.println(" g");
+}
+
+void loadcell_clear_calibration_points() {
+  cal.num_points = 0;
+  cal.calibrated = false;
+  cal.slope = 1.0f;
+  cal.intercept = 0.0f;
+  cal.r_squared = 0.0f;
+  Serial.println("Cleared all calibration points.");
+}
+
+bool loadcell_compute_regression() {
+  if (cal.num_points < 2) {
+    Serial.print("ERROR: Need at least 2 calibration points, have ");
+    Serial.println(cal.num_points);
+    return false;
+  }
+
+  // Least-squares linear regression: weight = slope * raw + intercept
+  // Uses the normal equations:
+  //   slope = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x^2) - sum(x)^2)
+  //   intercept = (sum(y) - slope * sum(x)) / n
+  //
+  // where x = raw_value, y = weight_g
+
+  int n = cal.num_points;
+  float sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+
+  for (int i = 0; i < n; i++) {
+    float x = cal.points[i].raw_value;
+    float y = cal.points[i].weight_g;
+    sum_x  += x;
+    sum_y  += y;
+    sum_xy += x * y;
+    sum_xx += x * x;
+  }
+
+  float denominator = n * sum_xx - sum_x * sum_x;
+
+  if (fabs(denominator) < 1e-12f) {
+    Serial.println("ERROR: Calibration points are collinear (all raw values identical).");
+    return false;
+  }
+
+  cal.slope = (n * sum_xy - sum_x * sum_y) / denominator;
+  cal.intercept = (sum_y - cal.slope * sum_x) / n;
+
+  // Compute R-squared (coefficient of determination)
+  float sum_y_mean = sum_y / n;
+  float ss_res = 0, ss_tot = 0;
+  for (int i = 0; i < n; i++) {
+    float y_pred = cal.slope * cal.points[i].raw_value + cal.intercept;
+    float residual = cal.points[i].weight_g - y_pred;
+    ss_res += residual * residual;
+    float diff_mean = cal.points[i].weight_g - sum_y_mean;
+    ss_tot += diff_mean * diff_mean;
+  }
+
+  if (ss_tot > 0) {
+    cal.r_squared = 1.0f - (ss_res / ss_tot);
+  } else {
+    cal.r_squared = 1.0f;  // all y values are identical (only possible with 1 point, but just in case)
+  }
+
   cal.calibrated = true;
 
-  float raw_diff = cal.raw_at_calib - cal.raw_at_0g;
-  if (fabs(raw_diff) > 1e-6f) {
-    slope = CALIB_WEIGHT_GRAMS / raw_diff;
-  }
+  Serial.println("=== Linear Regression Results ===");
+  Serial.print("Slope (grams/raw):     ");
+  Serial.println(cal.slope, 6);
+  Serial.print("Intercept (grams):      ");
+  Serial.println(cal.intercept, 4);
+  Serial.print("R-squared:              ");
+  Serial.println(cal.r_squared, 4);
+  Serial.print("Number of points:       ");
+  Serial.println(cal.num_points);
+  Serial.println("================================");
+
+  return true;
 }
 
 float loadcell_to_grams(float raw_reading) {
-  return slope * (raw_reading - offset);
+  if (!cal.calibrated) {
+    return 0.0f;
+  }
+  // grams = slope * raw + intercept
+  float grams = cal.slope * raw_reading + cal.intercept;
+  return grams;
 }
 
 Calibration loadcell_get_calibration() {
@@ -156,14 +253,21 @@ float loadcell_process_window(const float* samples, int count) {
   return result;
 }
 
+// Legacy: set calibration using two raw values (raw_0g, raw_calib).
+// Adds both as calibration points and computes regression.
 void loadcell_set_calibration(float raw_0g, float raw_calib) {
-  cal.raw_at_0g = raw_0g;
-  cal.raw_at_calib = raw_calib;
-  offset = raw_0g;
+  loadcell_clear_calibration_points();
 
-  float raw_diff = cal.raw_at_calib - cal.raw_at_0g;
-  if (fabs(raw_diff) > 1e-6f) {
-    slope = CALIB_WEIGHT_GRAMS / raw_diff;
-  }
-  cal.calibrated = true;
+  // Add 0g point
+  cal.points[cal.num_points].raw_value = raw_0g;
+  cal.points[cal.num_points].weight_g = 0.0f;
+  cal.num_points++;
+
+  // Add known weight point
+  cal.points[cal.num_points].raw_value = raw_calib;
+  cal.points[cal.num_points].weight_g = CALIB_WEIGHT_GRAMS;
+  cal.num_points++;
+
+  // Compute regression
+  loadcell_compute_regression();
 }

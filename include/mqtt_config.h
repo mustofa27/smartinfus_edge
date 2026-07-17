@@ -14,13 +14,13 @@
 #define MQTT_TOPIC_SUFFIX  "weight"
 
 // Select device ID: change to "device_1-c51c" or "device_2-c51c"
-#define MQTT_DEVICE_ID     "device_1-c51c"
+#define MQTT_DEVICE_ID     "device_2-c51c"
 
 // Full topic: "smart-infusion/device_1-c51c/weight"
 #define MQTT_TOPIC  MQTT_TOPIC_PREFIX "/" MQTT_DEVICE_ID "/" MQTT_TOPIC_SUFFIX
 
 // Device code for status checking
-#define DEVICE_CODE      "device_1-c51c"
+#define DEVICE_CODE      "device_2-c51c"
 
 // API base URL for device status check
 #define API_BASE_URL     "https://smartinfusion.icminovasi.my.id"
