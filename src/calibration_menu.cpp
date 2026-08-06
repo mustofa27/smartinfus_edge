@@ -1,18 +1,36 @@
 #include "calibration_menu.h"
 #include "loadcell.h"
+#include <stdio.h>
 
 // Global flag definition
-bool is_calibration = true;   // default to calibration mode
+bool is_calibration = false;   // default to calibration mode
+
+// Commands are line-based: they only execute after the Enter key is pressed.
+#define CMD_LINE_MAX  64
+static char cmd_line[CMD_LINE_MAX];
+static int  cmd_len = 0;
+
+// Block until the user presses Enter (consumes everything up to the newline).
+static void waitForEnter() {
+  while (true) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') return;
+    }
+    delay(50);
+  }
+}
 
 void calibration_menu_print_help() {
   Serial.println();
   Serial.println("====================================");
   Serial.println("   Calibration Menu (Linear Regression)");
   Serial.println("====================================");
-  Serial.println("Commands:");
+  Serial.println("Type a command, then press Enter:");
   Serial.println("  o              -> add point at 0g (remove all weight)");
   Serial.println("  w <weight>     -> add point at the given weight (e.g., w 536)");
   Serial.println("  c <raw> <wgt>  -> add point manually (raw value + weight)");
+  Serial.println("  s <slope> <int>  -> set slope & intercept directly (grams = slope*raw + intercept)");
   Serial.println("  l              -> list all calibration points");
   Serial.println("  x              -> clear all calibration points");
   Serial.println("  f              -> fit linear regression from stored points");
@@ -23,22 +41,19 @@ void calibration_menu_print_help() {
   Serial.println();
 }
 
-void calibration_menu_loop(HX711* scale) {
-  // Only process if a command is available
-  if (!Serial.available()) return;
+// Execute one complete command line (already terminated by Enter).
+static void process_command(HX711* scale, const char* line) {
+  // Skip any leading whitespace before the command letter
+  while (*line == ' ' || *line == '\t') line++;
 
-  char cmd = Serial.read();
+  char cmd = line[0];
 
   switch (cmd) {
 
     case 'o': {
       // Add calibration point at 0g (no load)
-      Serial.println("Place NO weight on the scale, then press any key...");
-      while (!Serial.available()) {
-        delay(100);
-      }
-      // consume the key
-      while (Serial.available()) Serial.read();
+      Serial.println("Place NO weight on the scale, then press Enter...");
+      waitForEnter();
 
       loadcell_add_calibration_point(scale, 0.0f);
       break;
@@ -46,20 +61,16 @@ void calibration_menu_loop(HX711* scale) {
 
     case 'w': {
       // Add calibration point at a user-specified weight
-      float weight = Serial.parseFloat();
-      if (weight <= 0) {
+      float weight = 0;
+      if (sscanf(line, "w %f", &weight) != 1 || weight <= 0) {
         Serial.println("Usage: w <weight_in_grams>");
         Serial.println("Place the known weight on the scale, then type w 536 (for example).");
         break;
       }
       Serial.print("Place ");
       Serial.print(weight, 1);
-      Serial.print("g on the scale, then press any key...");
-      while (!Serial.available()) {
-        delay(100);
-      }
-      // consume the key
-      while (Serial.available()) Serial.read();
+      Serial.print("g on the scale, then press Enter...");
+      waitForEnter();
 
       loadcell_add_calibration_point(scale, weight);
       break;
@@ -67,10 +78,24 @@ void calibration_menu_loop(HX711* scale) {
 
     case 'c': {
       // Add calibration point manually (raw value and weight)
-      float raw_val = Serial.parseFloat();
-      float weight  = Serial.parseFloat();
+      float raw_val = 0, weight = 0;
+      if (sscanf(line, "c %f %f", &raw_val, &weight) != 2) {
+        Serial.println("Usage: c <raw> <weight>");
+        break;
+      }
 
       loadcell_add_manual_point(raw_val, weight);
+      break;
+    }
+
+    case 's': {
+      // Set slope and intercept directly (from a known previous calibration)
+      float slope = 0, intercept = 0;
+      if (sscanf(line, "s %f %f", &slope, &intercept) != 2) {
+        Serial.println("Usage: s <slope> <intercept>");
+        break;
+      }
+      loadcell_set_slope_intercept(slope, intercept);
       break;
     }
 
@@ -187,4 +212,21 @@ void calibration_menu_loop(HX711* scale) {
       break;
   }
   Serial.println();
+}
+
+void calibration_menu_loop(HX711* scale) {
+  // Accumulate characters until Enter is pressed, then process the full line.
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cmd_len > 0) {
+        cmd_line[cmd_len] = '\0';
+        cmd_len = 0;
+        process_command(scale, cmd_line);
+      }
+      // empty lines (e.g. the second byte of CRLF) are ignored
+    } else if (cmd_len < CMD_LINE_MAX - 1) {
+      cmd_line[cmd_len++] = c;
+    }
+  }
 }

@@ -1,4 +1,5 @@
 #include "loadcell.h"
+#include "config.h"
 #include <math.h>
 
 // Global calibration state
@@ -90,13 +91,16 @@ static void cluster_rms(const float* data, int n, float* output) {
   *output = sqrtf(sum_sq / winner_count);
 }
 
-// Read one filtered value: pool 30, 2-means, pick biggest cluster, RMS
+// Read one filtered value by sampling the HX711 for CALIBRATION_SAMPLE_MS and
+// running the same 2-means + RMS pipeline used by the monitoring window.
 float loadcell_read(HX711* scale) {
-  float pool[POOL_SIZE];
+  float pool[CALIBRATION_READ_SAMPLES];
   int samples_read = 0;
+  unsigned long start = millis();
 
-  // Collect POOL_SIZE raw readings
-  for (int i = 0; i < POOL_SIZE; i++) {
+  // Collect raw samples over a full window (same duration as monitoring)
+  while (millis() - start < config::CALIBRATION_SAMPLE_MS &&
+         samples_read < CALIBRATION_READ_SAMPLES) {
     if (scale->is_ready()) {
       pool[samples_read++] = (float)scale->read();
     }
@@ -106,10 +110,8 @@ float loadcell_read(HX711* scale) {
   // If we got no readings, return 0
   if (samples_read == 0) return 0;
 
-  // Run 2-means + RMS on the collected samples
-  float result;
-  cluster_rms(pool, samples_read, &result);
-  return result;
+  // Same 2-means + RMS pipeline used by the monitoring window
+  return loadcell_process_window(pool, samples_read);
 }
 
 // =====================================================
@@ -124,6 +126,9 @@ void loadcell_add_calibration_point(HX711* scale, float weight_g) {
     return;
   }
 
+  Serial.print("Sampling for ");
+  Serial.print(config::CALIBRATION_SAMPLE_MS / 1000);
+  Serial.println(" s...");
   float raw = loadcell_read(scale);
   cal.points[cal.num_points].raw_value = raw;
   cal.points[cal.num_points].weight_g = weight_g;
@@ -245,7 +250,7 @@ Calibration loadcell_get_calibration() {
 }
 
 // Process any number of raw samples using the same 2-means + RMS pipeline
-// Used by both loadcell_read (single shot) and the 30-second window in main.cpp
+// Used by both loadcell_read (single shot) and the rolling monitoring window
 float loadcell_process_window(const float* samples, int count) {
   if (count == 0) return 0;
   float result;
@@ -270,4 +275,27 @@ void loadcell_set_calibration(float raw_0g, float raw_calib) {
 
   // Compute regression
   loadcell_compute_regression();
+}
+
+// Set the linear model coefficients directly (grams = slope * raw + intercept).
+// Used by the infusion setup when slope/intercept are already known (e.g. from a
+// previous calibration) instead of re-running regression from calibration points.
+bool loadcell_set_slope_intercept(float slope, float intercept) {
+  if (!isfinite(slope) || !isfinite(intercept) || fabs(slope) < 1e-12f) {
+    Serial.println("ERROR: Invalid slope/intercept. Slope must be finite and non-zero.");
+    return false;
+  }
+
+  cal.num_points = 0;
+  cal.slope = slope;
+  cal.intercept = intercept;
+  cal.r_squared = 1.0f;  // exact by definition (not fitted)
+  cal.calibrated = true;
+
+  Serial.print("Set slope=");
+  Serial.print(slope, 6);
+  Serial.print(" g/raw, intercept=");
+  Serial.print(intercept, 4);
+  Serial.println(" g");
+  return true;
 }

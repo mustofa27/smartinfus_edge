@@ -4,8 +4,9 @@
 #include <Arduino.h>
 #include <HX711.h>
 
-// Number of raw samples to pool per reading
-#define POOL_SIZE  30
+// Maximum number of raw samples buffered per calibration read.
+// Generous enough for a 5 s window even at the HX711's faster 80 SPS rate.
+#define CALIBRATION_READ_SAMPLES  150
 
 // Calibration reference weight in grams (used by default 'w' command)
 #define CALIB_WEIGHT_GRAMS  536.0
@@ -32,7 +33,8 @@ struct Calibration {
 // Initialize load cell with pin assignments
 void loadcell_init(int dout_pin, int sck_pin);
 
-// Get a single filtered reading using 2-means + RMS
+// Get a single filtered reading using the 2-means + RMS pipeline over a full
+// sample window (CALIBRATION_SAMPLE_MS), same as the monitoring window.
 float loadcell_read(HX711* scale);
 
 // === Linear Regression Calibration API ===
@@ -63,5 +65,11 @@ float loadcell_process_window(const float* samples, int count);
 // Legacy: set calibration with two points (0g and calib weight raw values).
 // Adds two calibration points and computes regression.
 void loadcell_set_calibration(float raw_0g, float raw_calib);
+
+// Set the linear model coefficients directly (grams = slope * raw + intercept).
+// Used by the infusion setup when slope/intercept are already known (e.g. from a
+// previous calibration), skipping the regression flow. Marks the scale as calibrated.
+// Returns true on success, false if slope is zero or either value is not finite.
+bool loadcell_set_slope_intercept(float slope, float intercept);
 
 #endif
